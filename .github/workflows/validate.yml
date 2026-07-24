@@ -1,0 +1,21 @@
+name: Validate compose files
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [wireguard, openvpn]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Validates syntax and, because every required variable uses ${VAR:?},
+      # also proves .env.example covers everything compose.yaml needs.
+      - name: Validate ${{ matrix.stack }}/compose.yaml
+        working-directory: ${{ matrix.stack }}
+        run: docker compose --env-file .env.example config --quiet
