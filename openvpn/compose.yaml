@@ -1,7 +1,7 @@
 services:
-  openvpn-tcp:
-    image: docker.io/qmcgaw/gluetun:latest
-    container_name: openvpn-tcp # change if you need to
+  openvpn:
+    image: docker.io/qmcgaw/gluetun:v3.41
+    container_name: openvpn # change if you need to
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -9,45 +9,63 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
+    sysctls:
+      # The Tailscale container shares this network namespace, so forwarding
+      # must be enabled *here* for the exit node to pass traffic.
+      # Remove the IPv6 line if your Docker daemon runs with IPv6 disabled,
+      # otherwise the container will fail to start.
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
     volumes:
       - ./gluetun:/gluetun # container path
     environment:
-      - PUID=xxxx # change to your puid
-      - PGID=xxx # change to your pgid
-      - TZ=xxx/xxx # input your timezone e.g. Europe/Zurich
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Etc/UTC}
       - VPN_SERVICE_PROVIDER=protonvpn # or another vpn provider
       - VPN_TYPE=openvpn
-      - OPENVPN_PROTOCOL=tcp
-      - OPENVPN_USER=xxx # change to your openvpn username
-      - OPENVPN_PASSWORD=xxx # change to your openvpn password
-      - SERVER_COUNTRIES=xxx # country name e.g. Switzerland
+      - OPENVPN_PROTOCOL=${OPENVPN_PROTOCOL:-udp} # udp is faster; tcp only if udp is blocked on your network
+      - OPENVPN_USER=${OPENVPN_USER:?set OPENVPN_USER in .env}
+      - OPENVPN_PASSWORD=${OPENVPN_PASSWORD:?set OPENVPN_PASSWORD in .env}
+      - SERVER_COUNTRIES=${SERVER_COUNTRIES:?set SERVER_COUNTRIES in .env}
       - HTTPPROXY=off # on if you wish to enable
       - SHADOWSOCKS=off # on if you wish to enable
-      #- FIREWALL_OUTBOUND_SUBNETS=xxx # optional, comment out to use local subnet with homelab services e.g. 192.168.1.0/24
       - UPDATER_PERIOD=24h
+      #- FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24
+
   tailscale-openvpn:
-    image: tailscale/tailscale:stable
+    image: tailscale/tailscale:v1.98
     container_name: tailscale-openvpn # change if you need to
+    restart: unless-stopped
+    depends_on:
+      openvpn:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    volumes:
-      - tsovvarlib:/var/lib
-      - tsovstate:/state
+    devices:
+      # Must be a device, not a volume — a bind-mounted node still gets
+      # blocked by the container's device cgroup.
       - /dev/net/tun:/dev/net/tun
-    network_mode: "service:openvpn-tcp"
-    restart: unless-stopped
+    volumes:
+      - tsovstate:/state
+    network_mode: "service:openvpn"
     environment:
-      - TS_HOSTNAME=openvpn # named it as you wish
-      - TS_AUTHKEY=tskey-client--xxx # it's better using trust credentials than auth key
-      - TS_EXTRA_ARGS=--advertise-exit-node --advertise-tags=tag:vpn
+      - TS_HOSTNAME=${TS_HOSTNAME:-openvpn} # name it as you wish
+      - TS_AUTHKEY=${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      - TS_EXTRA_ARGS=--advertise-exit-node --advertise-tags=tag:vpn --accept-dns=false
+      # Required. The image defaults to userspace networking, which cannot
+      # forward traffic for other nodes on Linux — the exit node would appear
+      # in the admin console but silently carry nothing.
+      - TS_USERSPACE=false
       - TS_NO_LOGS_NO_SUPPORT=true
       - TS_STATE_DIR=/state
       - TS_AUTH_ONCE=true
-      #- TS_ROUTES=xxx.xxx.xxx.xxx/xx # optional, comment out to use local subnet with homelab services e.g. 192.168.1.0/24, same as FIREWALL_OUTBOUND_SUBNETS
+      - TZ=${TZ:-Etc/UTC}
+      #- TS_ROUTES=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24, same as FIREWALL_OUTBOUND_SUBNETS
 
 volumes:
-  tsovvarlib:
-    driver: local
   tsovstate:
     driver: local

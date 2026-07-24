@@ -1,52 +1,74 @@
 services:
   wireguard:
-    image: docker.io/qmcgaw/gluetun:latest
+    image: docker.io/qmcgaw/gluetun:v3.41
     container_name: wireguard # change if you need to
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
+    sysctls:
+      # The Tailscale container shares this network namespace, so forwarding
+      # must be enabled *here* for the exit node to pass traffic.
+      # Remove the IPv6 line if your Docker daemon runs with IPv6 disabled,
+      # otherwise the container will fail to start.
+      - net.ipv4.ip_forward=1
+      - net.ipv6.conf.all.forwarding=1
     volumes:
       - ./gluetun:/gluetun # container path
     environment:
       - VPN_SERVICE_PROVIDER=protonvpn # or another vpn provider
       - VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=xxx # change to your wireguard private key
-      - WIREGUARD_PUBLIC_KEY=xxx # change to your wireguard public key
-      - WIREGUARD_ADDRESSES=xxx.xxx.xxx.xxx/xx # change to your wireguard address
-      - WIREGUARD_MTU=1320
-      - SERVER_COUNTRIES=xxx # change to country name e.g. Switzerland
-      - WIREGUARD_ALLOWED_IPS=0.0.0.0/0,::/6 # ipv4 and ipv6
-      - VPN_PORT_FORWARDING=on # optional
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:?set WIREGUARD_PRIVATE_KEY in .env}
+      - SERVER_COUNTRIES=${SERVER_COUNTRIES:?set SERVER_COUNTRIES in .env}
+      - WIREGUARD_MTU=${WIREGUARD_MTU:-1320} # ProtonVPN ships 1420; 1320 is a safe fallback
+      - WIREGUARD_ALLOWED_IPS=0.0.0.0/0,::/0 # all IPv4 and all IPv6
+      - VPN_PORT_FORWARDING=off # exit nodes don't need it; if you turn it on, also set PORT_FORWARD_ONLY=on
       - BLOCK_ADS=on # optional
       - VPN_ACCELERATOR=on # optional
-      - TZ=xxx # input your timezone e.g. Europe/Zurich
+      - TZ=${TZ:-Etc/UTC}
       - UPDATER_PERIOD=24h
-      #- FIREWALL_OUTBOUND_SUBNETS=xxx.xxx.xxx.xxx/xx # optional, comment out to use local subnet with homelab services e.g. 192.168.1.0/24
+      # Do NOT pin WIREGUARD_PUBLIC_KEY / WIREGUARD_ADDRESSES for ProtonVPN.
+      # Gluetun supplies the server's public key and the client address from
+      # its own server list. Hardcoding the values from a single downloaded
+      # config breaks the handshake as soon as gluetun rotates servers.
+      #- FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24
+
   tailscale-wireguard:
-    image: tailscale/tailscale:stable
+    image: tailscale/tailscale:v1.98
     container_name: tailscale-wireguard # change if you need to
+    restart: unless-stopped
+    depends_on:
+      wireguard:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    volumes:
-      - tsvarlib:/var/lib
-      - tsstate:/state
+    devices:
+      # Must be a device, not a volume — a bind-mounted node still gets
+      # blocked by the container's device cgroup.
       - /dev/net/tun:/dev/net/tun
+    volumes:
+      - tsstate:/state
     network_mode: "service:wireguard"
-    restart: unless-stopped
     environment:
-      - TS_HOSTNAME=wireguard # named it as you wish
-      - TS_AUTHKEY=tskey-client--xxx # it's better using trust credentials than auth key
-      - TS_EXTRA_ARGS=--advertise-exit-node --advertise-tags=tag:vpn
+      - TS_HOSTNAME=${TS_HOSTNAME:-wireguard} # name it as you wish
+      - TS_AUTHKEY=${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      - TS_EXTRA_ARGS=--advertise-exit-node --advertise-tags=tag:vpn --accept-dns=false
+      # Required. The image defaults to userspace networking, which cannot
+      # forward traffic for other nodes on Linux — the exit node would appear
+      # in the admin console but silently carry nothing.
+      - TS_USERSPACE=false
       - TS_NO_LOGS_NO_SUPPORT=true
       - TS_STATE_DIR=/state
       - TS_AUTH_ONCE=true
-      #- TS_ROUTES=xxx.xxx.xxx.xxx/xx # optional, comment out to use local subnet with homelab services e.g. 192.168.1.0/24, same as FIREWALL_OUTBOUND_SUBNETS
+      - TZ=${TZ:-Etc/UTC}
+      #- TS_ROUTES=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24, same as FIREWALL_OUTBOUND_SUBNETS
 
 volumes:
-  tsvarlib:
-    driver: local
   tsstate:
     driver: local
