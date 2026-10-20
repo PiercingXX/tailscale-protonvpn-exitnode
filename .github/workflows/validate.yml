@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -12,7 +15,7 @@ jobs:
       matrix:
         stack: [wireguard, openvpn]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Validates syntax and, because every required variable uses ${VAR:?},
       # also proves .env.example covers everything compose.yaml needs.

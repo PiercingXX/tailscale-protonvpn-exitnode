@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Image tags are pinned to a minor series (e.g. v1.104); Dependabot keeps
+  # that precision and opens a PR when a new minor is published.
+  - package-ecosystem: docker-compose
+    directories:
+      - /wireguard
+      - /openvpn
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
