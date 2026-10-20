@@ -1,7 +1,7 @@
 services:
   openvpn:
     image: docker.io/qmcgaw/gluetun:v3.41
-    container_name: openvpn # change if you need to
+    container_name: gluetun-openvpn # change if you need to
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -12,8 +12,8 @@ services:
     sysctls:
       # The Tailscale container shares this network namespace, so forwarding
       # must be enabled *here* for the exit node to pass traffic.
-      # Remove the IPv6 line if your Docker daemon runs with IPv6 disabled,
-      # otherwise the container will fail to start.
+      # Remove the IPv6 line if the host kernel has IPv6 disabled (e.g. booted
+      # with ipv6.disable=1), otherwise the container will fail to start.
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
@@ -28,18 +28,22 @@ services:
       - OPENVPN_USER=${OPENVPN_USER:?set OPENVPN_USER in .env}
       - OPENVPN_PASSWORD=${OPENVPN_PASSWORD:?set OPENVPN_PASSWORD in .env}
       - SERVER_COUNTRIES=${SERVER_COUNTRIES:?set SERVER_COUNTRIES in .env}
+      - VPN_PORT_FORWARDING=off # exit nodes don't need it; if you turn it on, also append +pmp to OPENVPN_USER and set PORT_FORWARD_ONLY=on
+      - BLOCK_ADS=on # optional
       - HTTPPROXY=off # on if you wish to enable
       - SHADOWSOCKS=off # on if you wish to enable
-      - UPDATER_PERIOD=24h
       #- FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24
 
   tailscale-openvpn:
-    image: tailscale/tailscale:v1.98
+    image: tailscale/tailscale:v1.104
     container_name: tailscale-openvpn # change if you need to
     restart: unless-stopped
     depends_on:
       openvpn:
         condition: service_healthy
+        # This container lives in gluetun's network namespace and loses all
+        # networking when gluetun restarts, so restart along with it.
+        restart: true
     security_opt:
       - no-new-privileges:true
     cap_add:
@@ -55,6 +59,9 @@ services:
     environment:
       - TS_HOSTNAME=${TS_HOSTNAME:-openvpn} # name it as you wish
       - TS_AUTHKEY=${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      # --accept-dns=false (also containerboot's default) matters here: this
+      # container shares gluetun's /etc/resolv.conf, so letting tailscale
+      # manage DNS would overwrite gluetun's resolver for the whole stack.
       - TS_EXTRA_ARGS=--advertise-exit-node --advertise-tags=tag:vpn --accept-dns=false
       # Required. The image defaults to userspace networking, which cannot
       # forward traffic for other nodes on Linux — the exit node would appear
@@ -72,23 +79,29 @@ services:
       - TZ=${TZ:-Etc/UTC}
       #- TS_ROUTES=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24, same as FIREWALL_OUTBOUND_SUBNETS
 
-  # Gluetun installs an ip rule pointing at a table whose only entry is
-  # "default dev tun0". That is evaluated long before tailscale's own rule at
-  # priority 5270, so replies addressed to tailnet clients get pushed into the
-  # ProtonVPN tunnel instead of back out tailscale0 — exit-node traffic goes
-  # out fine and nothing ever comes back.
-  #
-  # Installing a more-specific route for the tailnet CGNAT range fixes it. It
-  # runs on a loop because gluetun rebuilds its routes on every reconnect, and
-  # it detects the table rather than hardcoding one, since WireGuard and
-  # OpenVPN use different tables.
+  # Safety net — a no-op on this stack. In WireGuard mode, gluetun installs an
+  # ip rule that sends replies for tailnet clients into the VPN tunnel instead
+  # of back out tailscale0, and this loop counters it with a more-specific
+  # route for the tailnet CGNAT range in any table whose default is tun0.
+  # Gluetun's OpenVPN mode redirects with the 0.0.0.0/1 + 128.0.0.0/1 pair and
+  # installs no competing ip rule, so no table matches and nothing changes.
+  # It is kept so both stacks stay covered if gluetun's OpenVPN routing ever
+  # changes, and it logs if it ever has to restore the route. See "Why the
+  # third container exists" in the README.
   tailscale-route-fix:
-    image: tailscale/tailscale:v1.98
+    image: tailscale/tailscale:v1.104
     container_name: tailscale-openvpn-route-fix
     restart: unless-stopped
     depends_on:
-      - tailscale-openvpn
+      openvpn:
+        condition: service_healthy
+        restart: true
+      tailscale-openvpn:
+        condition: service_started
     network_mode: "service:openvpn"
+    # Without an init, sh runs as PID 1 and ignores SIGTERM, so every stop
+    # would wait out Docker's 10s kill timeout.
+    init: true
     security_opt:
       - no-new-privileges:true
     cap_add:
@@ -100,9 +113,11 @@ services:
         while :; do
           if ip link show tailscale0 >/dev/null 2>&1; then
             for t in main $$(ip rule show | sed -n 's/.*lookup \([0-9][0-9]*\).*/\1/p' | sort -u); do
-              if ip route show table "$$t" 2>/dev/null | grep -q '^default .*dev tun0'; then
-                ip route replace 100.64.0.0/10 dev tailscale0 table "$$t" 2>/dev/null
-              fi
+              routes=$$(ip route show table "$$t" 2>/dev/null)
+              echo "$$routes" | grep -q '^default .*dev tun0' || continue
+              echo "$$routes" | grep -q '^100\.64\.0\.0/10 dev tailscale0' && continue
+              ip route replace 100.64.0.0/10 dev tailscale0 table "$$t" &&
+                echo "restored tailnet return route in table $$t"
             done
           fi
           sleep 20

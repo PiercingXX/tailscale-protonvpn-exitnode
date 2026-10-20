@@ -5,7 +5,6 @@
 # Runtime state written by the gluetun bind mount
 # (servers.json, forwarded port, auth config).
 gluetun/
-**/gluetun/
 
 # Editor / OS noise
 .DS_Store

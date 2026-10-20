@@ -45,7 +45,7 @@ both at once as two distinct exit nodes.
 
 ### 🧰 Prerequisites
 
-- Docker Engine and the Compose plugin (or Portainer)
+- Docker Engine and the Compose plugin v2.17 or newer (or Portainer)
 - A Linux host with `/dev/net/tun` available
 - Active accounts for ProtonVPN and Tailscale
 
@@ -60,8 +60,17 @@ its own server list.
 > file. Pinning them breaks the handshake as soon as gluetun rotates to
 > another server in the country you selected.
 
+Before downloading, turn on **Moderate NAT** (paid plans). tailscaled sits
+behind ProtonVPN's NAT, and under Proton's default strict NAT Tailscale often
+can't establish direct connections, so traffic is relayed through Tailscale's
+DERP servers instead, which is slower. **VPN Accelerator** is chosen here too,
+if you want it. Both options belong to the key, so gluetun has no setting for
+them — to change them, generate a new config.
+
 *OpenVPN:* go to **Account** → **OpenVPN / IKEv2 username** and copy that
-username and password. These are **not** your ProtonVPN account login.
+username and password. These are **not** your ProtonVPN account login. On a
+paid plan, append `+nr` to the username (e.g. `abc123+nr`) to get Moderate NAT,
+for the same reason.
 
 ### 🏷️ Step 2: Add the tag to your ACL
 
@@ -84,18 +93,38 @@ add:
 }
 ```
 
+If your policy restricts access (anything other than the default allow-all
+rule), the people who will use the exit node also need access to
+`autogroup:internet`:
+
+```jsonc
+"grants": [
+  { "src": ["autogroup:member"], "dst": ["autogroup:internet"], "ip": ["*"] },
+],
+```
+
+With legacy `acls`, the equivalent is
+`{ "action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:internet:*"] }`.
+
 ### 🌐 Step 3: Create a Tailscale auth key
 
 Do this *after* Step 2 — `tag:vpn` has to exist before it can be selected.
 
 Go to <https://login.tailscale.com/admin/settings/keys>, select **Generate auth
 key**, and under **Tags** choose `tag:vpn`. Leave **Ephemeral** off, or the node
-is deleted every time it goes offline. The key is shown once; copy it now.
+is deleted every time it goes offline. If your tailnet requires device
+approval, also turn on **Pre-approved**. The key is shown once; copy it now.
 
 An OAuth client secret from the
 [trust credentials](https://login.tailscale.com/admin/settings/trust-credentials)
 page works too, if you prefer one that doesn't expire — it needs the
-`auth_keys` scope and the same tag.
+`auth_keys` scope and the same tag. Append `?ephemeral=false&preauthorized=true`
+to it: when an OAuth secret is used as an auth key, Tailscale defaults to an
+ephemeral node that still needs device approval.
+
+```
+TS_AUTHKEY=tskey-client-xxxxx?ephemeral=false&preauthorized=true
+```
 
 ### ⚙️ Step 4: Configure
 
@@ -131,15 +160,20 @@ matching your `TS_HOSTNAME`, find **Exit Node** under Routing Settings, click
 ## ✅ Verify it works
 
 ```bash
+# Run these from the stack directory. On the OpenVPN stack, use the
+# service names openvpn and tailscale-openvpn instead.
+
 # 1. Traffic is leaving through ProtonVPN — expect an IP in your chosen country.
-docker exec wireguard wget -qO- https://ipinfo.io/json
+docker compose exec wireguard wget -qO- https://ipinfo.io/json
 
 # 2. Tailscale is up and advertising.
-docker exec tailscale-wireguard tailscale status
+docker compose exec tailscale-wireguard tailscale status
 ```
 
 Then, from another device on your tailnet, select the node as your exit node
-and confirm your public IP matches the one above.
+and confirm your public IP matches the one above. `tailscale ping <TS_HOSTNAME>`
+from that device shows whether the connection is direct or relayed through
+DERP (see Moderate NAT in Step 1).
 
 ## 🩺 Troubleshooting
 
@@ -147,12 +181,15 @@ and confirm your public IP matches the one above.
 | --- | --- |
 | Node appears in the console but no traffic flows through it | `TS_USERSPACE=false` missing, or IP forwarding sysctls not applied. Both are set in the shipped compose files — check you didn't remove them. |
 | Client selects the exit node, pages never load, DNS may still work | Either `TS_DEBUG_FIREWALL_MODE=nftables` is missing or the `tailscale-route-fix` container isn't running. See [below](#why-the-third-container-exists). |
-| Traffic goes out but nothing comes back | The tailnet return route is missing. Check `docker exec tailscale-wireguard ip route get <client-tailscale-ip>` — it must say `dev tailscale0`, not `dev tun0`. |
+| Traffic goes out but nothing comes back | The tailnet return route is missing. Check `docker compose exec tailscale-wireguard ip route get <client-tailscale-ip>` — it must say `dev tailscale0`, not `dev tun0`. `docker compose logs tailscale-route-fix` shows each time the route had to be restored. |
+| Some users can't use the exit node | Your policy doesn't give them access to `autogroup:internet`. See Step 2. |
+| Exit node works but is slow or high-latency | Tailscale is relaying through DERP. Run `tailscale ping <TS_HOSTNAME>` from the client — `via DERP(...)` means relayed. Turn on Moderate NAT (Step 1). |
+| Everything stopped working after gluetun crashed and Docker restarted it | The other two containers are still attached to gluetun's old network namespace. Run `docker compose restart`. |
 | `requested tags [tag:vpn] are invalid or not permitted` | `tag:vpn` isn't in your ACL, or the credential doesn't own it. See Step 2. |
-| Container exits with `sysctl ... not found` or permission denied | Your Docker daemon runs with IPv6 disabled. Remove the `net.ipv6.conf.all.forwarding` line. |
+| Container exits with `sysctl ... not found` or permission denied | IPv6 is disabled in the host kernel (e.g. booted with `ipv6.disable=1`). Remove the `net.ipv6.conf.all.forwarding` line. |
 | WireGuard handshake never completes | A stale `WIREGUARD_PUBLIC_KEY`/`WIREGUARD_ADDRESSES` is set. Remove them and let gluetun choose. |
 | Gluetun never becomes healthy | Wrong credentials, or `SERVER_COUNTRIES` doesn't match a real country name. Check `docker compose logs wireguard`. |
-| Node re-registers as a new machine on every restart | The `tsstate` volume was removed. `TS_STATE_DIR` must persist. |
+| Node re-registers as a new machine on every restart | The state volume (`tsstate` / `tsovstate`) was removed — `TS_STATE_DIR` must persist — or the node is ephemeral, e.g. an OAuth secret without `?ephemeral=false`. See Step 3. |
 
 ## 🧠 Why the third container exists
 
@@ -190,18 +227,27 @@ stacks as a safety net, since it is a no-op wherever the collision is absent.
 > It routes the range via the Docker bridge (`dev eth0`), which is a different
 > wrong answer.
 
-Because these containers share a network namespace, restarting gluetun alone
-tears down networking for the others. Restart the whole stack
-(`docker compose restart`) rather than an individual service.
+Because these containers share a network namespace, the other two lose
+networking whenever gluetun's container restarts. `restart: true` on their
+`depends_on` makes Compose restart them along with gluetun for anything Compose
+does itself — `docker compose restart wireguard`, or recreating gluetun after a
+`pull`. Compose can't see restarts Docker makes on its own after a crash; if
+that happens, run `docker compose restart`.
 
 ## 🔄 Updating
 
-Images are pinned to a minor series (`gluetun:v3.41`, `tailscale:v1.98`) so you
+Images are pinned to a minor series (`gluetun:v3.41`, `tailscale:v1.104`) so you
 get patch fixes without surprise major upgrades:
 
 ```bash
 docker compose pull && docker compose up -d
 ```
+
+This also refreshes gluetun's ProtonVPN server list, which ships inside the
+image. Gluetun's periodic updater is left off because for ProtonVPN it needs
+your Proton account email and password (`UPDATER_PROTONVPN_EMAIL` /
+`UPDATER_PROTONVPN_PASSWORD`); set those and `UPDATER_PERIOD` yourself if you
+want it.
 
 Bump the tags in `compose.yaml` when you want a new minor version.
 

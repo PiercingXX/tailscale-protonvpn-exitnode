@@ -1,7 +1,7 @@
 services:
   wireguard:
     image: docker.io/qmcgaw/gluetun:v3.41
-    container_name: wireguard # change if you need to
+    container_name: gluetun-wireguard # change if you need to
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -12,13 +12,16 @@ services:
     sysctls:
       # The Tailscale container shares this network namespace, so forwarding
       # must be enabled *here* for the exit node to pass traffic.
-      # Remove the IPv6 line if your Docker daemon runs with IPv6 disabled,
-      # otherwise the container will fail to start.
+      # Remove the IPv6 line if the host kernel has IPv6 disabled (e.g. booted
+      # with ipv6.disable=1), otherwise the container will fail to start.
       - net.ipv4.ip_forward=1
       - net.ipv6.conf.all.forwarding=1
     volumes:
       - ./gluetun:/gluetun # container path
     environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-Etc/UTC}
       - VPN_SERVICE_PROVIDER=protonvpn # or another vpn provider
       - VPN_TYPE=wireguard
       - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY:?set WIREGUARD_PRIVATE_KEY in .env}
@@ -27,22 +30,26 @@ services:
       - WIREGUARD_ALLOWED_IPS=0.0.0.0/0,::/0 # all IPv4 and all IPv6
       - VPN_PORT_FORWARDING=off # exit nodes don't need it; if you turn it on, also set PORT_FORWARD_ONLY=on
       - BLOCK_ADS=on # optional
-      - VPN_ACCELERATOR=on # optional
-      - TZ=${TZ:-Etc/UTC}
-      - UPDATER_PERIOD=24h
+      - HTTPPROXY=off # on if you wish to enable
+      - SHADOWSOCKS=off # on if you wish to enable
       # Do NOT pin WIREGUARD_PUBLIC_KEY / WIREGUARD_ADDRESSES for ProtonVPN.
       # Gluetun supplies the server's public key and the client address from
       # its own server list. Hardcoding the values from a single downloaded
       # config breaks the handshake as soon as gluetun rotates servers.
+      # VPN Accelerator and Moderate NAT have no gluetun setting either: they
+      # belong to the private key, chosen when you generate the config.
       #- FIREWALL_OUTBOUND_SUBNETS=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24
 
   tailscale-wireguard:
-    image: tailscale/tailscale:v1.98
+    image: tailscale/tailscale:v1.104
     container_name: tailscale-wireguard # change if you need to
     restart: unless-stopped
     depends_on:
       wireguard:
         condition: service_healthy
+        # This container lives in gluetun's network namespace and loses all
+        # networking when gluetun restarts, so restart along with it.
+        restart: true
     security_opt:
       - no-new-privileges:true
     cap_add:
@@ -58,6 +65,9 @@ services:
     environment:
       - TS_HOSTNAME=${TS_HOSTNAME:-wireguard} # name it as you wish
       - TS_AUTHKEY=${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      # --accept-dns=false (also containerboot's default) matters here: this
+      # container shares gluetun's /etc/resolv.conf, so letting tailscale
+      # manage DNS would overwrite gluetun's resolver for the whole stack.
       - TS_EXTRA_ARGS=--advertise-exit-node --advertise-tags=tag:vpn --accept-dns=false
       # Required. The image defaults to userspace networking, which cannot
       # forward traffic for other nodes on Linux — the exit node would appear
@@ -84,14 +94,21 @@ services:
   # Installing a more-specific route for the tailnet CGNAT range fixes it. It
   # runs on a loop because gluetun rebuilds its routes on every reconnect, and
   # it detects the table rather than hardcoding one, since WireGuard and
-  # OpenVPN use different tables.
+  # OpenVPN use different tables. It logs each time it restores the route.
   tailscale-route-fix:
-    image: tailscale/tailscale:v1.98
+    image: tailscale/tailscale:v1.104
     container_name: tailscale-wireguard-route-fix
     restart: unless-stopped
     depends_on:
-      - tailscale-wireguard
+      wireguard:
+        condition: service_healthy
+        restart: true
+      tailscale-wireguard:
+        condition: service_started
     network_mode: "service:wireguard"
+    # Without an init, sh runs as PID 1 and ignores SIGTERM, so every stop
+    # would wait out Docker's 10s kill timeout.
+    init: true
     security_opt:
       - no-new-privileges:true
     cap_add:
@@ -103,9 +120,11 @@ services:
         while :; do
           if ip link show tailscale0 >/dev/null 2>&1; then
             for t in main $$(ip rule show | sed -n 's/.*lookup \([0-9][0-9]*\).*/\1/p' | sort -u); do
-              if ip route show table "$$t" 2>/dev/null | grep -q '^default .*dev tun0'; then
-                ip route replace 100.64.0.0/10 dev tailscale0 table "$$t" 2>/dev/null
-              fi
+              routes=$$(ip route show table "$$t" 2>/dev/null)
+              echo "$$routes" | grep -q '^default .*dev tun0' || continue
+              echo "$$routes" | grep -q '^100\.64\.0\.0/10 dev tailscale0' && continue
+              ip route replace 100.64.0.0/10 dev tailscale0 table "$$t" &&
+                echo "restored tailnet return route in table $$t"
             done
           fi
           sleep 20
