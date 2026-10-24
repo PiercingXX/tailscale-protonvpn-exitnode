@@ -1,0 +1,28 @@
+I have a question about the routing in your project, but there's no way 
+to start a discussion or raise an issue. Your bio says you don't want 
+emails and that issues should be raised in the relevant repo, so this is 
+the only option left to me.
+
+The issue is that all traffic is directed through the VPN, even the 
+tailscale control traffic and tunnel itself. This causes enormous amounts 
+of latency, and even double tunneling that could cause MTU issues. 
+Hopefully you had that in mind, because in this case the MTU budget works 
+out, and there's no excess fragmenting going on. However, as it is now, it 
+is a horrible idea to run this container on your local network for the 
+purpose of offering vpn connectivity to your tailscale clients, because 
+every little packet has to traverse the internets, enter the vpn tunnel, 
+get processed by the exit node, then back out through the tunnel and on 
+to wherever it is headed. The return path is the exact same in reverse. 
+If it is a security argument, I get it. But at least it should be an 
+option to let the tailscale traffic bypass the tunnel to avoid excessive 
+latency, in addition to being rate limited by DERP because a direct 
+tailscale connection cannot be established. At least that has been my 
+experience so far.
+
+Are you aware of this, and are there plans to mitigate? I appreciate your 
+effort on this project, but in my opinion this needs to be handled to make 
+it performant and useful for those of us that aren't paranoid about 
+potentially revealing the container public address. Unless you're knee 
+deep in working out a solution already, I'd be happy to take a stab at it.
+
+HS
