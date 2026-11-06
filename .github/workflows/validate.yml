@@ -19,3 +19,17 @@ jobs:
       - name: Validate ${{ matrix.stack }}/compose.yaml
         working-directory: ${{ matrix.stack }}
         run: docker compose --env-file .env.example config --quiet
+
+  lint-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check route-fix.sh (sh)
+        run: sh -n common/route-fix.sh
+
+      - name: Syntax check verify.sh (bash)
+        run: bash -n scripts/verify.sh
+
+      - name: ShellCheck
+        run: shellcheck common/route-fix.sh scripts/verify.sh

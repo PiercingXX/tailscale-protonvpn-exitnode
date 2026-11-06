@@ -54,6 +54,13 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - tsstate:/state
+    healthcheck:
+      # "healthy" means tailscaled is logged in and Running, not merely started.
+      test: ["CMD-SHELL", "tailscale status --json | grep -q '\"BackendState\": \"Running\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     network_mode: "service:wireguard"
     environment:
       - TS_HOSTNAME=${TS_HOSTNAME:-wireguard} # name it as you wish
@@ -75,41 +82,29 @@ services:
       - TZ=${TZ:-Etc/UTC}
       #- TS_ROUTES=${LAN_SUBNET} # optional, uncomment to reach homelab services e.g. 192.168.1.0/24, same as FIREWALL_OUTBOUND_SUBNETS
 
-  # Gluetun installs an ip rule (priority ~101) pointing at a table whose only
-  # entry is "default dev tun0". That is evaluated long before tailscale's own
-  # rule at priority 5270, so replies addressed to tailnet clients get pushed
-  # into the ProtonVPN tunnel instead of back out tailscale0 — exit-node
-  # traffic goes out fine and nothing ever comes back.
-  #
-  # Installing a more-specific route for the tailnet CGNAT range fixes it. It
-  # runs on a loop because gluetun rebuilds its routes on every reconnect, and
-  # it detects the table rather than hardcoding one, since WireGuard and
-  # OpenVPN use different tables.
+  # Keeps the tailnet return route in place (and, if TS_BYPASS_VPN=on, routes
+  # tailscaled's own traffic around the tunnel). All logic and the reasons for
+  # it are documented in common/route-fix.sh.
   tailscale-route-fix:
     image: tailscale/tailscale:v1.98
     container_name: tailscale-wireguard-route-fix
     restart: unless-stopped
     depends_on:
-      - tailscale-wireguard
+      tailscale-wireguard:
+        condition: service_healthy
     network_mode: "service:wireguard"
     security_opt:
       - no-new-privileges:true
     cap_add:
       - NET_ADMIN
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        while :; do
-          if ip link show tailscale0 >/dev/null 2>&1; then
-            for t in main $$(ip rule show | sed -n 's/.*lookup \([0-9][0-9]*\).*/\1/p' | sort -u); do
-              if ip route show table "$$t" 2>/dev/null | grep -q '^default .*dev tun0'; then
-                ip route replace 100.64.0.0/10 dev tailscale0 table "$$t" 2>/dev/null
-              fi
-            done
-          fi
-          sleep 20
-        done
+    volumes:
+      - ../common/route-fix.sh:/route-fix.sh:ro
+    environment:
+      # EXPERIMENTAL, off by default. "on" sends tailscaled's own traffic
+      # (control plane, DERP, direct peers) outside the VPN. This exposes the
+      # host's real IP to Tailscale and its peers. See README.
+      - TS_BYPASS_VPN=${TS_BYPASS_VPN:-off}
+    entrypoint: ["/bin/sh", "/route-fix.sh"]
 
 volumes:
   tsstate:

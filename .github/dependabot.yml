@@ -1,0 +1,15 @@
+# Images are pinned to minor versions; Dependabot proposes the bumps.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker-compose"
+    directory: "/wireguard"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker-compose"
+    directory: "/openvpn"
+    schedule:
+      interval: "weekly"

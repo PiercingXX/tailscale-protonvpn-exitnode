@@ -9,7 +9,7 @@ Gluetun holds the ProtonVPN tunnel; the Tailscale container shares gluetun's
 network namespace, so every packet Tailscale forwards is already inside the
 VPN. If the tunnel drops, gluetun's killswitch drops the traffic with it.
 
-A third, tiny container (`tailscale-route-fix`) keeps one route in place.
+A third, tiny container (`tailscale-route-fix`, script in `common/route-fix.sh`) keeps one route in place.
 Gluetun and Tailscale each manage the namespace's routing and firewall without
 knowing about each other, and two of their defaults collide in ways that
 silently break exit-node forwarding — see
@@ -30,6 +30,8 @@ silently break exit-node forwarding — see
 | `wireguard/` | ProtonVPN over **WireGuard**. Faster, fewer moving parts — **start here**. |
 | `openvpn/` | ProtonVPN over **OpenVPN**. Use when WireGuard/UDP is blocked on your network. |
 | `*/compose.yaml` | Gluetun + Tailscale + route-fix service definitions. |
+| `common/route-fix.sh` | The route-fix logic, shared by both stacks. |
+| `scripts/verify.sh` | Post-install health check. |
 | `*/.env.example` | Template for your credentials. Copy to `.env`. |
 
 The two stacks are independent and use separate Docker volumes, so you can run
@@ -138,8 +140,43 @@ docker exec wireguard wget -qO- https://ipinfo.io/json
 docker exec tailscale-wireguard tailscale status
 ```
 
+For the OpenVPN stack, the container names are `openvpn` and `tailscale-openvpn`.
+
+Or run every check at once (egress IP, Tailscale state, return route, firewall
+backend, route-fix container):
+
+```bash
+scripts/verify.sh wireguard   # or: openvpn
+```
+
 Then, from another device on your tailnet, select the node as your exit node
 and confirm your public IP matches the one above.
+
+## ⚠️ Known limitation, and the optional bypass
+
+Because Tailscale shares gluetun's network namespace, all of Tailscale's own
+traffic (control plane, DERP, and direct peer WireGuard UDP) is also sent through
+the ProtonVPN tunnel. Consequences:
+
+- Extra latency.
+- Double-tunnel MTU pressure.
+- Direct peer connections usually can't be established, so traffic falls back to
+  DERP relays.
+
+By default this is deliberate: it keeps the killswitch complete and never
+exposes the host's real IP.
+
+**Experimental opt-in:** set `TS_BYPASS_VPN=on` in `.env` and run
+`docker compose up -d`. `tailscaled` marks its own packets (fwmark `0x80000`);
+the route-fix container then routes only those out the Docker bridge instead of
+the tunnel. Traffic forwarded for exit-node clients is not marked and still
+leaves through ProtonVPN.
+
+> **Cost:** Tailscale and its peers will see this host's real IP, and the
+> killswitch no longer covers `tailscaled`'s own traffic. IPv4 only. This has
+> not been tested against every gluetun release; if `docker logs
+> <stack>-route-fix` shows `bypass: ... skipping`, no change was made. Tracked
+> in [issue #2](https://github.com/PiercingXX/tailscale-protonvpn-exitnode/issues/2).
 
 ## 🩺 Troubleshooting
 
